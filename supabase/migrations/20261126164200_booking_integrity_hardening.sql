@@ -1,4 +1,4 @@
--- Migration: 00003_booking_integrity_hardening.sql
+-- Migration: 20261126164200_booking_integrity_hardening.sql
 -- Purpose:
 --   1. Enforce active-facility and participant-capacity rules at database level,
 --      including revalidation when an Administrator approves a booking.
@@ -97,7 +97,7 @@ BEGIN
       AND NULLIF(BTRIM(rejection_reason), '') IS NULL
   ) THEN
     RAISE EXCEPTION
-      'Cannot apply migration 00003: existing rejected bookings contain an empty rejection_reason. Review and correct those records before retrying.';
+      'Cannot apply migration 20261126164200_booking_integrity_hardening.sql: existing rejected bookings contain an empty rejection_reason. Review and correct those records before retrying.';
   END IF;
 END;
 $preflight$;

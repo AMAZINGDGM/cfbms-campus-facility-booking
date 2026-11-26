@@ -1,4 +1,4 @@
--- Migration: 00002_rls_policies.sql
+-- Migration: 20261126164100_rls_policies.sql
 -- Description: Row Level Security (RLS) policies and helper functions for CFBMS
 
 -- 1. Enable RLS on all 4 tables

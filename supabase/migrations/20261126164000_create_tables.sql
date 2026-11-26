@@ -1,4 +1,4 @@
--- Migration: 00001_create_tables.sql
+-- Migration: 20261126164000_create_tables.sql
 -- Description: Core tables, constraints, indexes, and triggers for CFBMS
 
 -- 1. Enable btree_gist extension for exclusion constraint support
