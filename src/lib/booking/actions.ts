@@ -29,7 +29,9 @@ export async function createBooking(formData: FormData) {
 
   const data = parsed.data;
 
-  // Validate capacity (BR-05)
+  // Application-level validation (BR-05).
+  // Migration 00003 also enforces active status and capacity in PostgreSQL,
+  // so direct Data API requests cannot bypass this business rule.
   const { data: facility, error: facilityError } = await supabase
     .from('facilities')
     .select('capacity, is_active')
@@ -48,7 +50,7 @@ export async function createBooking(formData: FormData) {
     return { error: `Participant count exceeds facility capacity of ${facility.capacity}` };
   }
 
-  // Insert booking — DB exclusion constraint handles conflict detection (BR-11, BR-12)
+  // PostgreSQL exclusion constraint handles overlapping active bookings.
   const { data: booking, error } = await supabase
     .from('bookings')
     .insert({
@@ -68,6 +70,9 @@ export async function createBooking(formData: FormData) {
     if (error.code === '23P01') {
       return { error: 'This time slot conflicts with an existing booking. Please choose a different time.' };
     }
+    if (error.code === '23514') {
+      return { error: error.message };
+    }
     return { error: error.message };
   }
 
@@ -82,38 +87,37 @@ export async function approveBooking(bookingId: string) {
 
   if (!user) return { error: 'Authentication required' };
 
-  // Verify admin role (BR-14)
-  const { data: profile } = await supabase
+  // Verify Administrator role (BR-14).
+  const { data: profile, error: profileError } = await supabase
     .from('profiles')
     .select('role')
     .eq('id', user.id)
     .single();
 
-  if (profile?.role !== 'administrator') {
+  if (profileError || profile?.role !== 'administrator') {
     return { error: 'Only administrators can approve bookings' };
   }
 
-  // Verify booking is pending
-  const { data: booking } = await supabase
-    .from('bookings')
-    .select('status')
-    .eq('id', bookingId)
-    .single();
-
-  if (!booking) return { error: 'Booking not found' };
-  if (booking.status !== 'pending') return { error: 'Only pending bookings can be approved' };
-
-  // Update status — DB constraint revalidates availability (BR-13)
-  const { error } = await supabase
+  // Atomic conditional update:
+  // only a row that is still Pending can transition to Approved.
+  // This prevents two concurrent administrators from both receiving success.
+  const { data: updatedBooking, error } = await supabase
     .from('bookings')
     .update({ status: 'approved' })
-    .eq('id', bookingId);
+    .eq('id', bookingId)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
 
   if (error) {
     if (error.code === '23P01') {
       return { error: 'Cannot approve: this time slot now conflicts with another booking' };
     }
     return { error: error.message };
+  }
+
+  if (!updatedBooking) {
+    return { error: 'Booking was not found or is no longer pending' };
   }
 
   revalidatePath('/admin/bookings');
@@ -127,42 +131,46 @@ export async function rejectBooking(bookingId: string, formData: FormData) {
 
   if (!user) return { error: 'Authentication required' };
 
-  // Verify admin role (BR-14)
-  const { data: profile } = await supabase
+  // Verify Administrator role (BR-14).
+  const { data: profile, error: profileError } = await supabase
     .from('profiles')
     .select('role')
     .eq('id', user.id)
     .single();
 
-  if (profile?.role !== 'administrator') {
+  if (profileError || profile?.role !== 'administrator') {
     return { error: 'Only administrators can reject bookings' };
   }
 
-  const reason = formData.get('rejection_reason') as string;
-  const parsed = rejectBookingSchema.safeParse({ rejection_reason: reason });
+  const rawReason = formData.get('rejection_reason');
+  const parsed = rejectBookingSchema.safeParse({
+    rejection_reason: typeof rawReason === 'string' ? rawReason.trim() : '',
+  });
+
   if (!parsed.success) {
     return { error: parsed.error.issues[0].message };
   }
 
-  // Verify booking is pending
-  const { data: booking } = await supabase
-    .from('bookings')
-    .select('status')
-    .eq('id', bookingId)
-    .single();
-
-  if (!booking) return { error: 'Booking not found' };
-  if (booking.status !== 'pending') return { error: 'Only pending bookings can be rejected' };
-
-  const { error } = await supabase
+  // Atomic conditional update:
+  // only a row that is still Pending can transition to Rejected.
+  const { data: updatedBooking, error } = await supabase
     .from('bookings')
     .update({
       status: 'rejected',
       rejection_reason: parsed.data.rejection_reason,
     })
-    .eq('id', bookingId);
+    .eq('id', bookingId)
+    .eq('status', 'pending')
+    .select('id')
+    .maybeSingle();
 
-  if (error) return { error: error.message };
+  if (error) {
+    return { error: error.message };
+  }
+
+  if (!updatedBooking) {
+    return { error: 'Booking was not found or is no longer pending' };
+  }
 
   revalidatePath('/admin/bookings');
   revalidatePath('/requester/bookings');
