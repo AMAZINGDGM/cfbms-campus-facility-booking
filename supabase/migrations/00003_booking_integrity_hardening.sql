@@ -1,18 +1,22 @@
 -- Migration: 00003_booking_integrity_hardening.sql
 -- Purpose:
---   1. Enforce active-facility and participant-capacity rules at database level.
+--   1. Enforce active-facility and participant-capacity rules at database level,
+--      including revalidation when an Administrator approves a booking.
 --   2. Require a non-empty rejection reason for rejected bookings.
 --   3. Restrict booking status changes to Pending -> Approved/Rejected.
 --   4. Restrict authenticated UPDATE access to status and rejection_reason only.
 --
 -- Decision baseline:
 --   DEC-01: Facility capacity MUST be validated for every booking.
+--   DEC-02: Facility active status and current capacity MUST be revalidated
+--           during the Pending-to-Approved transition.
 --
 -- This is an additive migration. Do not edit 00001 or 00002.
 -- Apply only after 00001_create_tables.sql and 00002_rls_policies.sql.
 
 -- ============================================================================
 -- 1. Enforce active facility and participant capacity on booking writes
+--    Revalidate on Pending -> Approved using the facility's current values.
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION public.enforce_booking_facility_capacity()
@@ -25,9 +29,19 @@ DECLARE
   v_capacity INTEGER;
   v_is_active BOOLEAN;
 BEGIN
+  -- UPDATE triggers also fire when a listed column is included in SET, even
+  -- when its value is unchanged. Skip unrelated updates (including rejection),
+  -- but always validate inserts, facility/participant changes, and approval.
+  IF TG_OP = 'UPDATE' THEN
+    IF NEW.facility_id IS NOT DISTINCT FROM OLD.facility_id
+       AND NEW.participant_count IS NOT DISTINCT FROM OLD.participant_count
+       AND NOT (OLD.status = 'pending' AND NEW.status = 'approved') THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+
   -- Lock the facility row while reading its current capacity and active status.
-  -- This prevents a concurrent facility update from changing these values
-  -- halfway through this booking validation.
+  -- This serializes this validation against concurrent facility-row updates.
   SELECT f.capacity, f.is_active
     INTO v_capacity, v_is_active
   FROM public.facilities AS f
@@ -62,13 +76,13 @@ DROP TRIGGER IF EXISTS trg_enforce_booking_facility_capacity
   ON public.bookings;
 
 CREATE TRIGGER trg_enforce_booking_facility_capacity
-  BEFORE INSERT OR UPDATE OF facility_id, participant_count
+  BEFORE INSERT OR UPDATE OF facility_id, participant_count, status
   ON public.bookings
   FOR EACH ROW
   EXECUTE FUNCTION public.enforce_booking_facility_capacity();
 
 COMMENT ON FUNCTION public.enforce_booking_facility_capacity() IS
-  'Rejects booking inserts or facility/participant changes when the facility is inactive or participant_count exceeds current facility capacity.';
+  'Rejects booking inserts, facility/participant changes, and Pending-to-Approved transitions when the facility is inactive or participant_count exceeds current facility capacity.';
 
 -- ============================================================================
 -- 2. Require a non-empty rejection reason for rejected bookings
